@@ -1,16 +1,16 @@
-# resvered-file-reader
-A Java implementation of a reader which read text file line-by-line (one line at a time),
+# reversed-file-reader
+Java implementation of a reader which read text file line-by-line (one line at a time),
 starting with the last line in the file, and finishing with the first line
 
-## Development and runtime environment specifications
+## Development and Runtime Environment Specifications
 
-Developed and tested in:
+**Developed and tested in:**
 - OS: Windows 10 & Ubuntu 22.04
 - IDE: VS Code
 - Java: 8
 - Package manager: [maven](https://maven.apache.org/)
 
-Third parties:
+**Maven Plugins:**
 - [maven-checkstyle-plugin](https://maven.apache.org/plugins/maven-checkstyle-plugin/) for enforcing [Google Java Style](https://google.github.io/styleguide/javaguide.html) standard.
 
 ## Project Structure
@@ -27,8 +27,19 @@ Third parties:
       ├── large.log // large input (~100MB, ~800K lines)
       └── small.txt // small input
 ```
+## Quick Performance Result
+With input file [src/main/resources/large.txt](src/main/resources/large.txt):
+  - size: ~100MB
+  - lines: ~800K
 
-## Building project
+**Hardware Specifications**:
+`Windows 10, Intel Xeon E3-1505M @ 2.80Hz (8 CPUs), 16Gb RAM`
+
+**Result**:
+- **Execution Time**: ~500ms
+- **Memory Usage**: ~5MB
+
+## Building Project
 Get the project source codes
 ```bash
 git clone git@github.com:philong6297/reversed-file-reader.git
@@ -36,48 +47,67 @@ git clone git@github.com:philong6297/reversed-file-reader.git
 
 Make sure you have installed:
 - [maven](https://maven.apache.org/)
+- appropriated JDK & JRE for Java 8
 
-Build the project with CMake and Ninja:
+Build the project:
 ```bash
-# create a build environment
-mkdir build
-cd build
+mvn verify
 
-# Configure project and install third parties at `build` folder
-cmake -DCMAKE_BUILD_TYPE=Release \
-      -DCMAKE_TOOLCHAIN_FILE=external/vcpkg/scripts/buildsystems/vcpkg.cmake \
-      -DCMAKE_CXX_STANDARD=17 \
-      -G Ninja \
-      ..
+# Run the benchmark
+java -cp ./target/reversed-file-reader-1.0.jar \
+          com.longlp.Benchmark \
+          [path-to-input-file] \
+          print_reversed=[0,1]
+```
+If you want to use my attached benchmark files, make sure to unarchive the ``input.zip`` file in [src/main/resources](src/main/resources)
 
-
-# Build the project
-cmake --build . --config Release
-
-# Run the executable
-./order-book-watcher
+For large file, it is recommended to not print the reversed contents to the output:
+```
+java -cp ./target/reversed-file-reader-1.0.jar \
+          com.longlp.Benchmark \
+          ./src/main/resources/large.txt
+```
+For small file, we can easily print them with ``print_reversed=1``
+```
+java -cp ./target/reversed-file-reader-1.0.jar \
+          com.longlp.Benchmark \
+          ./src/main/resources/small.txt \
+          print_reversed=1
+```
 
 ## About the solution
-After some manual tests, I came up with these assumptions:
-- input files are formatted in JSON Lines, each line is either an `Order Book status` or a successful `Trade record` with corresponding information
-- the data is well-structured, there is no need to validate them
-- based on the problem description, I can know that:
-  - the `CANCEL` cases only happen when there is no `Trade record` in between.
-  - by comparing the previous and next `Order Book status`, with additional information from `Trade record`, I can classify the `AGGRESSIVE` order in which side.
+We can split the problem into the following main tasks:
+- Read the file in reversed order
+- Achieve a good performance instead of abusing one-byte-per-access
 
-For program parallelizing task, I have observed that to classify the order, I only need the information of the previous and next `Order Book status` with `Trade record`. Therefore, it is reasonable to pipeline the parsing phase with classification phase:
-- Parse each line from input file
-- Get the ``symbol`` field, assign it to a worker (``InstrumentFeedsWorker``).
-- Create a task that will let this worker record the previous `Order Book status` (also the `Trade record` in-between if any), compare with the current `Order Book status` which is parsed from current line, then log the classified result to ``<symbol>.txt`` file.
-- Post this task to a thread pool, minimize task working time and thread usage.
+### Read the file in reversed order
+Nothing much to describe in this task, we can just ``seek`` to the end of the file, ignore the EOL then start to read.
+### Replace one-byte-per-access
+Inspired from [BufferedReader](https://docs.oracle.com/javase/8/docs/api/java/io/BufferedReader.html),
+I have used a naive implementation of **buffered accessing**. In summary, my approach is described as follows:
+- Store a part of the file into a buffer to reduce the number of direct ``read`` operations from the file
+- With the buffer, we can calculate and provide the ``line`` to the output.
+- After a `line`` is read, we can re-fill the buffer with the next bytes from the file again.
 
-However we must ensure the sequential between tasks with the same `symbol`, the task which is recorded first must be processed first.
+For convenience, instead of implementing from scratch the entire ``Reader`` class, I have decided to implement a ``ReversedLineInputStream`` so for an adoption-friendly purpose. Thus, we can wrap it in any ``Reader``:
+```java
+InputStream istream = new ReversedLineInputStream(file);
+ReversedFileReader reader = new BufferedReader(new InputStreamReader(istream));
+String line = "";
+while (true) {
+    line = reader.readLine();
+    if (line == null) {
+        break;
+    }
+    System.out.println(line);
+}
+```
 
-With these requirements, I don't think it is neccessary to re-implement from scratch the thread pool with prioriy handling (or dependency graph). Therefore, I have used [taskflow](https://github.com/taskflow/taskflow) for high performance parallel computing.
-
-In conclusion, my approach for this problem is using multi-threading with priority, on ``symbol`` level.
-
-This is a snapshot for runtime execution from my local machine - `Windows 10, LLVM Clang 14, Release build, Intel Xeon E3-1505M @ 2.80Hz (8 CPUs), 16Gb RAM` :
-![snapshop](/data/snapshop.PNG)
-
-I have also setup a basic CI/CD flow with Github Actions for Linux, MacOS and Windows environme
+### Implementation Caveats
+- **Encoding supports**:\
+The problem did not mention encoding awareness. Thus, my implementation has not supported these things.
+- **Fixed size buffer at 1024x1024**:\
+It is not hard to the user-defined buffer size. However, as per ``REQ02: The project will be implemented as a single Java class``, I have decided to simplify my codes as much as possible for reviewing purposes.
+- **Synchronization & Atomic operations in file accessing**:
+It is not hard to solve this task with C++. However,
+due to the lack of in-depth knowledge of Java advanced concepts, I cannot yet try these concepts in time for the test.
